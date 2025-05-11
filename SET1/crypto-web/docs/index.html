@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>XOR Cracker</title>
+</head>
+<body>
+  <h1>XOR Cracker (Cryptopals Set 1 #6)</h1>
+  <textarea id="input" rows="10" cols="80" placeholder="Paste base64-encoded ciphertext here..."></textarea><br>
+  <button onclick="crack()">Crack</button>
+  <pre id="output"></pre>
+
+  <script type="module">
+    import init, { crack_repeating_key_xor } from '../pkg/xor_web.js';
+
+    async function crack() {
+      await init();
+      const input = document.getElementById("input").value;
+      const result = crack_repeating_key_xor(input);
+      document.getElementById("output").textContent = result;
+    }
+  </script>
+</body>
+</html>
+

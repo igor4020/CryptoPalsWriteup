@@ -1,0 +1,15 @@
+{
+  "name": "crypto-web",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "crypto_web_bg.wasm",
+    "crypto_web.js",
+    "crypto_web.d.ts"
+  ],
+  "main": "crypto_web.js",
+  "types": "crypto_web.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
