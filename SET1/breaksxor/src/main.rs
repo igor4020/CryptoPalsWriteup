@@ -1,26 +1,24 @@
 use std::fs::File;
-use std::io::{self, BufRead};
+use std::io::{self, Read};
 use std::path::Path;
 
-
-use cryptoutils::{single_byte_xor, hex_2_bytes, score_english};
+use cryptoutils::{
+    single_byte_xor, hex_2_bytes, xor_with_key, score_english, hamming_distance,
+    base64_to_bytes,
+};
 use clap::Parser;
 
-
 #[derive(Parser)]
-#[command(name = "XOR breaker")]
-#[command(version = "0.1")]
-#[command(about = "Breaks single and multi bytes key xor encryption on hex strings and files", long_about = None)]
 struct Cli {
-    #[arg(long)]
-    hex: Option<String>,
     #[arg(long)]
     file_path: Option<String>,
     #[arg(long)]
-    single_byte_key: Option<bool>,
-    #[arg(long)]
-    multi_byte_key: Option<bool>
+    multi_byte_key: Option<bool>,
 }
+
+const MIN_KEYSIZE: usize = 2;
+const MAX_KEYSIZE: usize = 40;
+const TOP_KEYSIZES: usize = 3;  // try the 3 best keysizes
 
 fn breaksxor(ciphertext: &[u8]) -> (f32, u8, String) {
     let mut best_score = f32::MIN;
@@ -42,49 +40,89 @@ fn breaksxor(ciphertext: &[u8]) -> (f32, u8, String) {
     (best_score, best_key, best_plaintext)
 }
 
+/// Returns the top N keysizes (2..=40) ranked by lowest normalized Hamming distance.
+fn find_key_sizes(ciphertext: &[u8]) -> Vec<usize> {
+    let mut distances = Vec::new();
 
-fn main() {
+    for keysize in MIN_KEYSIZE..=MAX_KEYSIZE {
+        if ciphertext.len() < keysize * 4 { continue; }
+        // take first 4 blocks of length `keysize`
+        let chunks: Vec<&[u8]> = (0..4)
+            .map(|i| &ciphertext[i*keysize .. (i+1)*keysize])
+            .collect();
+        // compute three pairwise distances and normalize
+        let mut dists = Vec::new();
+        for pair in &[(0,1), (1,2), (2,3)] {
+            let (a, b) = (chunks[pair.0], chunks[pair.1]);
+            let dist = hamming_distance(a, b) as f32 / keysize as f32;
+            dists.push(dist);
+        }
+        let avg = dists.iter().sum::<f32>() / dists.len() as f32;
+        distances.push((avg, keysize));
+    }
+
+    distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    distances.into_iter()
+             .take(TOP_KEYSIZES)
+             .map(|(_, ks)| ks)
+             .collect()
+}
+
+/// Given a ciphertext and a single keysize, finds the best key (via single-byte XOR)
+/// and returns (key_bytes, decrypted_plaintext, score).
+fn break_for_keysize(ciphertext: &[u8], keysize: usize) -> (Vec<u8>, String, f32) {
+    // transpose into `keysize` blocks
+    let mut blocks = vec![Vec::new(); keysize];
+    for (i, &b) in ciphertext.iter().enumerate() {
+        blocks[i % keysize].push(b);
+    }
+
+    // recover each key‐byte
+    let mut key = Vec::with_capacity(keysize);
+    for block in blocks {
+        let (_score, k, _pt) = breaksxor(&block);
+        key.push(k);
+    }
+
+    // decrypt full message
+    let decrypted = xor_with_key(ciphertext, &key);
+    let plaintext = String::from_utf8_lossy(&decrypted).to_string();
+    let score = score_english(plaintext.as_bytes());
+
+    (key, plaintext, score)
+}
+
+/// Tries the top N keysizes and picks the **one** producing the highest-scoring plaintext.
+fn break_repeating_key_xor(ciphertext: &[u8]) -> (Vec<u8>, String) {
+    let mut best = (Vec::new(), String::new(), f32::MIN);
+
+    for keysize in find_key_sizes(ciphertext) {
+        let (key, pt, score) = break_for_keysize(ciphertext, keysize);
+        if score > best.2 {
+            best = (key, pt, score);
+        }
+    }
+
+    // best is (key, plaintext, score)
+    (best.0, best.1)
+}
+
+fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let hex_string: &str = match &(cli.hex) {
-        Some(s) => s.as_str(),
-        None => "",
-    };
+    if cli.multi_byte_key.unwrap_or(false) {
+        let path = cli.file_path.expect("Please provide --file_path");
+        let mut b64 = String::new();
+        File::open(&path)?.read_to_string(&mut b64)?;
 
-    let file_path: &str = match &(cli.file_path) {
-        Some(s) => s.as_str(),
-        None => "",
-    };
+        let ciphertext =
+            base64_to_bytes(&b64).expect("Base64 decoding failed");
+        let (key, plaintext) = break_repeating_key_xor(&ciphertext);
 
-    if !hex_string.is_empty(){
-        println!("Hex String: {}", hex_string);
-
-        let bytes = hex_2_bytes(hex_string).expect("Invalid Hex string");
-        let (best_score, best_key, best_plaintext) = breaksxor(&bytes);
-        println!("Score: {}, Key: {}, Plaintext: {}", best_score, best_key, best_plaintext);
- 
+        println!("Guessed key: {}", String::from_utf8_lossy(&key));
+        println!("Decrypted text:\n{}", plaintext);
     }
 
-    if !file_path.is_empty() {
-        let path = Path::new(&file_path);
-        let file = File::open(&path).expect("File not found or invalid path");
-        let reader = io::BufReader::new(file);
-
-        let mut best_score_final: f32 = 0.0;
-        let mut best_key_final: u8 = 0;
-        let mut best_plaintext_final: String = "".to_string();
-        for line in reader.lines() {
-            let line = line.expect("Invalid line");
-            let bytes = hex_2_bytes(&line).expect("Invalid Hex");
-            let (best_score, best_key, best_plaintext) = breaksxor(&bytes);
-            if best_score > best_score_final {
-                best_score_final = best_score;
-                best_key_final = best_key;
-                best_plaintext_final = best_plaintext;
-            }
-
-        }
-        println!("Score: {}, Key: {}, Plaintext: {}", best_score_final, best_key_final, best_plaintext_final);
-    }
+    Ok(())
 }
 

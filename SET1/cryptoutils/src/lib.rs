@@ -130,6 +130,46 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
         .sum()
 }
 
+pub fn base64_to_bytes(input: &str) -> Result<Vec<u8>, String> {
+    let mut cleaned = input.trim().replace("\n", "").replace("\r", "");
+    if cleaned.len() % 4 != 0 {
+        return Err("Invalid Base64 input length".to_string());
+    }
+
+    let mut result = Vec::new();
+    let mut buffer = [0u8; 4];
+
+    let index_in_table = |c: u8| -> Option<u8> {
+        BASE64_TABLE.iter().position(|&b| b == c).map(|i| i as u8)
+    };
+
+    let bytes = cleaned.as_bytes();
+
+    for chunk in bytes.chunks(4) {
+        for i in 0..4 {
+            buffer[i] = match chunk.get(i) {
+                Some(&b'=') => 0,
+                Some(&b) => index_in_table(b).ok_or(format!("Invalid base64 character: {}", b as char))?,
+                None => return Err("Invalid base64 chunk".to_string()),
+            };
+        }
+
+        let triple = ((buffer[0] as u32) << 18)
+            | ((buffer[1] as u32) << 12)
+            | ((buffer[2] as u32) << 6)
+            | (buffer[3] as u32);
+
+        result.push(((triple >> 16) & 0xFF) as u8);
+        if chunk[2] != b'=' {
+            result.push(((triple >> 8) & 0xFF) as u8);
+        }
+        if chunk[3] != b'=' {
+            result.push((triple & 0xFF) as u8);
+        }
+    }
+
+    Ok(result)
+}
 
 
 
@@ -169,4 +209,12 @@ mod tests {
         let distance = hamming_distance(s1, s2);
         assert_eq!(distance, 37);
     }
+
+    #[test]
+    fn base64_decode_test() {
+        let input = "SGVsbG8gV29ybGQh";
+        let decoded = base64_to_bytes(input).expect("Failed to decode base64");
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World!");
+    }
+
 }

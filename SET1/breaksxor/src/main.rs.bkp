@@ -1,0 +1,147 @@
+use std::fs::File;
+use std::io::{self, BufRead, Read};
+use std::path::Path;
+
+use cryptoutils::{single_byte_xor, hex_2_bytes, xor_with_key, score_english, hamming_distance, base64_to_bytes};
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "XOR breaker")]
+#[command(version = "0.1")]
+#[command(about = "Breaks single and multi bytes key xor encryption on hex strings and files", long_about = None)]
+struct Cli {
+    #[arg(long)]
+    hex: Option<String>,
+    #[arg(long)]
+    file_path: Option<String>,
+    #[arg(long)]
+    single_byte_key: Option<bool>,
+    #[arg(long)]
+    multi_byte_key: Option<bool>,
+}
+
+fn breaksxor(ciphertext: &[u8]) -> (f32, u8, String) {
+    let mut best_score = f32::MIN;
+    let mut best_key = 0;
+    let mut best_plaintext = String::new();
+
+    for key in 0u8..=255 {
+        let plaintext_bytes = single_byte_xor(ciphertext, key);
+        if let Ok(plaintext) = String::from_utf8(plaintext_bytes.clone()) {
+            let score = score_english(plaintext.as_bytes());
+            if score > best_score {
+                best_score = score;
+                best_key = key;
+                best_plaintext = plaintext;
+            }
+        }
+    }
+
+    (best_score, best_key, best_plaintext)
+}
+
+// Estimate key sizes using normalized Hamming distance
+fn guess_key_size(ciphertext: &[u8], max_keysize: usize) -> usize {
+    let mut best_keysize = 2;
+    let mut lowest_dist = f32::MAX;
+
+    for keysize in 2..=max_keysize {
+        if ciphertext.len() < keysize * 4 {
+            continue;
+        }
+
+        let dist1 = hamming_distance(&ciphertext[0..keysize], &ciphertext[keysize..2 * keysize]) as f32;
+        let dist2 = hamming_distance(&ciphertext[2 * keysize..3 * keysize], &ciphertext[3 * keysize..4 * keysize]) as f32;
+
+        let norm = (dist1 + dist2) / 2.0 / keysize as f32;
+
+        if norm < lowest_dist {
+            lowest_dist = norm;
+            best_keysize = keysize;
+        }
+    }
+
+    best_keysize
+}
+
+// Solve repeating-key XOR
+fn break_repeating_xor(ciphertext: &[u8]) -> (Vec<u8>, String) {
+    let keysize = guess_key_size(ciphertext, 40);
+
+    // Transpose blocks
+    let mut blocks: Vec<Vec<u8>> = vec![vec![]; keysize];
+    for (i, &byte) in ciphertext.iter().enumerate() {
+        blocks[i % keysize].push(byte);
+    }
+
+    let mut key = Vec::new();
+    for block in blocks {
+        let (_, best_key, _) = breaksxor(&block);
+        key.push(best_key);
+    }
+
+    let decrypted = xor_with_key(ciphertext, &key);
+    let plaintext = String::from_utf8_lossy(&decrypted).to_string();
+
+    (key, plaintext)
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    let hex_string: &str = cli.hex.as_deref().unwrap_or("");
+    let file_path: &str = cli.file_path.as_deref().unwrap_or("");
+
+    let mbmode = cli.multi_byte_key.unwrap_or(false);
+    let sbmode = cli.single_byte_key.unwrap_or(false);
+
+    if sbmode {
+        if !hex_string.is_empty() {
+            let bytes = hex_2_bytes(hex_string).expect("Invalid Hex string");
+            let (_score, key, plaintext) = breaksxor(&bytes);
+            println!("Single-byte key: {}, Decrypted:\n{}", key, plaintext);
+        }
+
+        if !file_path.is_empty() {
+            let path = Path::new(file_path);
+            let file = File::open(path).expect("Invalid path");
+            let reader = io::BufReader::new(file);
+
+            let mut best_score = f32::MIN;
+            let mut best_result = String::new();
+            let mut best_key = 0u8;
+
+            for line in reader.lines() {
+                let line = line.expect("Invalid line");
+                let bytes = hex_2_bytes(&line).expect("Invalid hex");
+                let (score, key, result) = breaksxor(&bytes);
+                if score > best_score {
+                    best_score = score;
+                    best_result = result;
+                    best_key = key;
+                }
+            }
+
+            println!("Best key: {}, Decrypted:\n{}", best_key, best_result);
+        }
+    }
+
+    if mbmode {
+        if !file_path.is_empty() {
+            let mut base64_content = String::new();
+            File::open(file_path)
+                .expect("File error")
+                .read_to_string(&mut base64_content)
+                .expect("Read error");
+
+            let ciphertext = base64_to_bytes(&base64_content).expect("Base64 decode failed");
+
+            let (key, plaintext) = break_repeating_xor(&ciphertext);
+            println!("Guessed key: {}\n", String::from_utf8_lossy(&key));
+            println!("Decrypted text:\n{}", plaintext);
+        } else {
+            println!("Multi-byte mode requires --file_path to base64 ciphertext");
+        }
+    }
+}
+
